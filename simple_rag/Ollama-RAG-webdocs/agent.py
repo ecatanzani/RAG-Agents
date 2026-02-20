@@ -106,10 +106,8 @@ def main():
         add_start_index=True,  # track index in original document
     )
     all_splits = text_splitter.split_documents(docs)
-    logger.info(f"Split blog post into {len(all_splits)} sub-documents.")
-
-    # Store documents
     vector_store.add_documents(documents=all_splits)
+    logger.info(f"Split blog post into {len(all_splits)} sub-documents.")
 
     # Extract documentation context
     def get_dynamic_agent(url: str):
@@ -124,7 +122,9 @@ def main():
 
         # Direct call to the model to get the topic string
         topic_chain = topic_extractor_prompt | model
-        topic_response = topic_chain.invoke({"content": docs[0].page_content[:2000]})
+        topic_response = topic_chain.invoke(
+            {"content": docs[0].page_content[:2000]}
+        )
         main_topic = topic_response.content.strip()
 
         logger.info(f"Detected Topic: {main_topic}")
