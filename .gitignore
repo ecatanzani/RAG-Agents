@@ -222,3 +222,13 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,linux
+
+chromadb-data
+# uv (Python package manager)
+.venv/
+.uv/
+uv.lock
+*.toml
+*.python-version
+data
+.vscode

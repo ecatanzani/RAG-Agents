@@ -17,13 +17,6 @@ def parse_args():
                         dest="input", help="Input question")
     return parser.parse_args()
 
-
-def build_graph(
-    model_name: str,
-    model_temperature: float,
-    error_strings: List[str]
-    )
-
 def main():
     args = parse_args()
     llm = ChatBedrock(
