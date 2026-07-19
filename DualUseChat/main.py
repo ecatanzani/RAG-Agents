@@ -6,6 +6,8 @@ from langchain_aws.chat_models import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_core.output_parsers import StrOutputParser
@@ -28,6 +30,79 @@ prompt_template = ChatPromptTemplate.from_messages([
     ("user", "{user_query}")
 ])
 
+
+@st.cache_resource(show_spinner="Initializing embeddings model")
+def load_embeddings_model():
+    return BedrockEmbeddings(
+        model_id=params.AWS_EMBEDDINGS_MODEL_ID, 
+        region_name=params.AWS_EMBEDDINGS_REGION
+    )
+
+@st.cache_resource(show_spinner="Initializing legal knowledge base...")
+def initialize_vector_store(_embeddings_model):
+    db_exists = False
+    chroma_dir = Path(params.VECTOR_STORE_DIR)
+    if chroma_dir.is_dir():
+        files = list(chroma_dir.iterdir())
+        if any(f.suffix == '.sqlite3' or f == 'chroma.sqlite3' for f in files) or len(files) > 0:
+            db_exists = True
+
+    if db_exists:
+        return Chroma(
+            collection_name=params.VECTOR_STORE_COLLECTION_NAME,
+            persist_directory=params.VECTOR_STORE_DIR,
+            embedding_function=_embeddings_model
+        )
+
+    data_dir = Path(params.DOCUMENTS_DIR)
+    pdf_files = [f for f in list(data_dir.iterdir()) if f.suffix.lower() == '.pdf']
+    
+    if not pdf_files:
+        st.error(f"No PDFs found in {params.DOCUMENTS_DIR} folder! Drop some PDFs there and refresh.")
+        raise Exception(f"[ERROR] Documents directory {params.DOCUMENTS_DIR} is empty")
+
+    all_docs = []
+    for file_path in pdf_files:
+        loader = PyPDFLoader(str(file_path))
+        all_docs.extend(loader.load())
+
+    text_splitter = SemanticChunker(
+        _embeddings_model, 
+        breakpoint_threshold_type="percentile"
+    )
+    split_docs = text_splitter.split_documents(all_docs)
+
+    vectorstore = Chroma.from_documents(
+        documents=split_docs,
+        embedding=_embeddings_model,
+        persist_directory=params.VECTOR_STORE_DIR,
+        collection_name=params.VECTOR_STORE_COLLECTION_NAME
+    )
+    return vectorstore
+
+@st.cache_resource(show_spinner="Building hybrid ensemble retriever...")
+def build_ensemble_retriever(_vs):
+    if not _vs:
+        return None
+    
+    semantic_retriever = _vs.as_retriever(search_kwargs={"k": params.N_RETRIEVED_DOCS}) if _vs else None
+    vectorstore_data = _vs.get()['documents']
+    bm25_retriever = BM25Retriever.from_texts(vectorstore_data)
+    bm25_retriever.k = params.N_RETRIEVED_DOCS
+    retriever = EnsembleRetriever(
+        retrievers=[semantic_retriever, bm25_retriever],
+        weights=[0.5, 0.5]
+    )
+    return retriever
+
+@st.cache_resource(show_spinner="Initializing LLM")
+def load_model():
+    return ChatBedrockConverse(
+        model_id=params.AWS_LLM_MODEL_ID,
+        temperature=params.AWS_LLM_TEMPERATURE,
+        region_name=params.AWS_LLM_REGION
+    )
+
 def format_docs(docs):
     return "\n\n".join([doc.page_content for doc in docs])
 
@@ -39,69 +114,9 @@ def main():
         st.error(f"[ERROR] Documents directory {params.DOCUMENTS_DIR} does not exist")
         raise Exception(f"[ERROR] Documents directory {params.DOCUMENTS_DIR} does not exist")
 
-    @st.cache_resource(show_spinner="Initializing embeddings model")
-    def load_embeddings_model():
-        return BedrockEmbeddings(
-            model_id=params.AWS_EMBEDDINGS_MODEL_ID, 
-            region_name=params.AWS_EMBEDDINGS_REGION
-        )
-
     embeddings_model = load_embeddings_model()
-
-    @st.cache_resource(show_spinner="Initializing legal knowledge base...")
-    def initialize_vector_store():
-        db_exists = False
-        chroma_dir = Path(params.VECTOR_STORE_DIR)
-        if chroma_dir.is_dir():
-            files = list(chroma_dir.iterdir())
-            if any(f.suffix == '.sqlite3' or f == 'chroma.sqlite3' for f in files) or len(files) > 0:
-                db_exists = True
-
-        if db_exists:
-            return Chroma(
-                collection_name=params.VECTOR_STORE_COLLECTION_NAME,
-                persist_directory=params.VECTOR_STORE_DIR,
-                embedding_function=embeddings_model
-            )
-
-        data_dir = Path(params.DOCUMENTS_DIR)
-        pdf_files = [f for f in list(data_dir.iterdir()) if f.suffix.lower() == '.pdf']
-        
-        if not pdf_files:
-            st.error(f"No PDFs found in {params.DOCUMENTS_DIR} folder! Drop some PDFs there and refresh.")
-            raise Exception(f"[ERROR] Documents directory {params.DOCUMENTS_DIR} is empty")
-
-        all_docs = []
-        for file_path in pdf_files:
-            loader = PyPDFLoader(str(file_path))
-            all_docs.extend(loader.load())
-
-        text_splitter = SemanticChunker(
-            embeddings_model, 
-            breakpoint_threshold_type="percentile"
-        )
-        split_docs = text_splitter.split_documents(all_docs)
-
-        vectorstore = Chroma.from_documents(
-            documents=split_docs,
-            embedding=embeddings_model,
-            persist_directory=params.VECTOR_STORE_DIR,
-            collection_name=params.VECTOR_STORE_COLLECTION_NAME
-        )
-        return vectorstore
-
-    vector_store = initialize_vector_store()
-    retriever = vector_store.as_retriever(search_kwargs={"k": 4}) if vector_store else None
-
-
-    @st.cache_resource(show_spinner="Initializing LLM")
-    def load_model():
-        return ChatBedrockConverse(
-            model_id=params.AWS_LLM_MODEL_ID,
-            temperature=params.AWS_LLM_TEMPERATURE,
-            region_name=params.AWS_LLM_REGION
-        )
-    
+    vector_store = initialize_vector_store(embeddings_model)
+    retriever = build_ensemble_retriever(vector_store)
     llm = load_model()
 
     if "messages" not in st.session_state:

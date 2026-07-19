@@ -2,6 +2,8 @@ import argparse
 from typing import Tuple
 from pydantic import BaseModel, Field
 from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
 from langchain_aws import BedrockEmbeddings
 from langchain_aws import ChatBedrockConverse
 from langchain_core.prompts import ChatPromptTemplate
@@ -14,6 +16,7 @@ AWS_EMBEDDINGS_REGION: str = "eu-south-1"
 AWS_LLM_MODEL_ID: str = "eu.amazon.nova-pro-v1:0"
 AWS_LLM_REGION: str = "eu-south-1"
 AWS_LLM_TEMPERATURE: float = 0
+N_RETRIEVED_DOCS: int = 10
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RAG system")
@@ -37,12 +40,26 @@ def answer_question(user_question: str) -> Tuple[str, str]:
         region_name=AWS_EMBEDDINGS_REGION
     )
 
+    # Semantic vectorstore and retriever
     vector_store = Chroma(
         collection_name=CHROMA_COLLECTION_NAME,
         persist_directory=CHROMA_PATH,
         embedding_function=embeddings_model
     )
-    retriever = vector_store.as_retriever(search_kwargs={"k": 30})
+    semantic_retriever = vector_store.as_retriever(search_kwargs={"k": N_RETRIEVED_DOCS})
+
+    # Add BM25 retriever
+    chroma_data = vector_store.get()
+    all_texts = chroma_data['documents']
+    
+    bm25_retriever = BM25Retriever.from_texts(all_texts)
+    bm25_retriever.k = N_RETRIEVED_DOCS
+
+    # Combine the retrievers
+    retriever = EnsembleRetriever(
+        retrievers=[semantic_retriever, bm25_retriever],
+        weights=[0.5, 0.5] 
+    )
 
     llm = ChatBedrockConverse(
         model_id=AWS_LLM_MODEL_ID,
@@ -95,7 +112,7 @@ def main():
         persist_directory=CHROMA_PATH,
         embedding_function=embeddings_model
     )
-    retriever = vector_store.as_retriever(search_kwargs={"k": 15})
+    retriever = vector_store.as_retriever(search_kwargs={"k": N_RETRIEVED_DOCS})
 
     llm = ChatBedrockConverse(
         model_id=AWS_LLM_MODEL_ID,
